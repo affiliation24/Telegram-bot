@@ -1,68 +1,113 @@
+from aiogram import Bot, Dispatcher
+from aiogram.types import Message
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.filters import Command
 import requests
-import time
+from bs4 import BeautifulSoup
+from typing import List, Union
+import spacy
+from collections import Counter
+from config import TOKEN
+import asyncio
 
-# Замените на свой токен
-BOT_TOKEN = '8043398659:AAEM1BPCJaXalx9mu8fF5u5rC-hXeR5VaGg'
+# Инициализация бота
+bot = Bot(token=TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
 
-def handle_update(update):
-    if 'message' in update:
-        chat_id = update['message']['chat']['id']
-        text = update['message'].get('text', '')
+# Загрузка модели spaCy для русского языка
+nlp = spacy.load("ru_core_news_sm")
 
-        if text == '/start':
-            send_message(chat_id, "Привет! Я готов помочь.")
-        elif text.startswith('/'):
-            process_command(chat_id, text)
-        else:
-            send_echo(chat_id, f"Повторяю ваше сообщение: {text}")
 
-def send_message(chat_id, message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {'chat_id': chat_id, 'text': message}
-    response = requests.post(url, json=data)
-    if response.status_code != 200:
-        print(f"Ошибка при отправке сообщения: {response.status_code}")
+# Функция для извлечения текста с веб-сайта
+def extract_text_from_url(url: str) -> Union[str, None]:
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, "html.parser")
 
-def send_echo(chat_id, message):
-    """Отправка повторения сообщения."""
-    send_message(chat_id, message)
+        # Извлечение только текста из тегов <p>
+        paragraphs = soup.find_all("p")
+        text = " ".join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
 
-def process_command(chat_id, command_text):
-    """Обработка команд."""
-    if command_text == '/help':
-        send_message(chat_id, "Доступны следующие команды:\n/start\n/help")
+        # Проверяем, извлёкся ли текст
+        return text if text else None
+    except requests.exceptions.RequestException as e:
+        return f"Ошибка при запросе к URL: {e}"
+    except Exception as e:
+        return f"Ошибка при обработке текста: {e}"
+
+
+# Функция для создания резюме текста
+def summarize_text(text: str, top_n: int = 10) -> Union[List[str], str]:
+    try:
+        doc = nlp(text)
+
+        # Разбиваем текст на предложения
+        sentences = [sent.text for sent in doc.sents]
+
+        # Считаем частоту слов, исключая стоп-слова
+        words = [token.text.lower() for token in doc if token.is_alpha and not token.is_stop]
+        word_frequencies = Counter(words)
+
+        # Вычисляем вес каждого предложения
+        sentence_scores = {
+            sent: sum(word_frequencies.get(word.lower(), 0) for word in sent.split())
+            for sent in sentences
+        }
+
+        # Сортируем предложения по их весу
+        ranked_sentences = sorted(sentence_scores.items(), key=lambda x: x[1], reverse=True)
+
+        # Возвращаем топ-N предложений
+        return [sent[0] for sent in ranked_sentences[:top_n]]
+    except Exception as e:
+        return f"Ошибка при анализе текста: {e}"
+
+
+# Хендлер команды /start
+@dp.message(Command(commands=["start"]))
+async def send_welcome(message: Message):
+    await message.reply(
+        "Привет! Я бот для анализа научных статей. Отправьте мне ссылку на статью, и я создам краткое резюме для вас."
+    )
+
+
+# Хендлер для обработки URL
+@dp.message()
+async def process_url(message: Message):
+    url = message.text.strip()
+    await message.reply("Проверяю ссылку и извлекаю текст...")
+
+    extracted_text = extract_text_from_url(url)
+    if isinstance(extracted_text, str) and extracted_text.startswith("Ошибка"):
+        await message.reply(extracted_text)
+        return
+
+    if not extracted_text:
+        await message.reply("Не удалось извлечь текст с указанной страницы.")
+        return
+
+    await message.reply("Анализирую текст и создаю резюме...")
+
+    summary = summarize_text(extracted_text)
+    if isinstance(summary, str) and summary.startswith("Ошибка"):
+        await message.reply(summary)
+        return
+
+    if summary:
+        await message.reply("Резюме статьи:\n\n" + "\n\n".join(f"- {sent}" for sent in summary))
     else:
-        send_message(chat_id, "Неизвестная команда. Попробуйте /help.")
+        await message.reply("Не удалось создать резюме статьи.")
 
-def get_and_handle_updates():
-    offset = None
-    empty_update_count = 0  # Счетчик для отслеживания пустых обновлений
-    while True:
-        try:
-            params = {"offset": offset + 1} if offset is not None else {}
-            response = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates", params=params)
 
-            if response.status_code == 200:
-                updates = response.json().get('result', [])
-                
-                if updates:
-                    for update in updates:
-                        handle_update(update)
-                        offset = update["update_id"]
-                    empty_update_count = 0  # Сброс счетчика пустых обновлений после получения данных
-                else:
-                    # Выводим сообщение только при первом пустом обновлении
-                    if empty_update_count == 0:
-                        print("Пустые обновления, ждём дальше...")
-                    empty_update_count += 1
+# Основной цикл бота
+async def main():
+    print("Бот запущен...")
+    await dp.start_polling(bot)
 
-            else:
-                print(f"Ошибка при получении обновлений: статус-код {response.status_code}. Ждем дальше...")
-
-        except Exception as e:
-            print(f"Произошла ошибка: {e}. Ждем дальше...")
-
-        time.sleep(2)  # Увеличенная задержка между запросами
 
 if __name__ == "__main__":
-    get_and_handle_updates()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Бот остановлен.")
