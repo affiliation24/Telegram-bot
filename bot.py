@@ -1,3 +1,4 @@
+import asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -8,7 +9,6 @@ from typing import List, Union
 import spacy
 from collections import Counter
 from config import TOKEN
-import asyncio
 
 # Инициализация бота
 bot = Bot(token=TOKEN)
@@ -64,6 +64,23 @@ def summarize_text(text: str, top_n: int = 10) -> Union[List[str], str]:
         return f"Ошибка при анализе текста: {e}"
 
 
+# Формирование ответа в виде поста
+def format_post(summary: List[str], url: str) -> str:
+    title = "Резюме статьи"
+    introduction = ""
+    main_content = "\n".join(f"{sentence}" for sentence in summary)
+    conclusion = "Для более детального изучения перейдите по ссылке ниже."
+    sources = f"{url}"
+
+    return (
+        f"<b>{title}</b>\n"
+        f"{introduction}\n"                     # Введение
+        f"{main_content}\n\n"                   # Основная часть
+        f"{conclusion}\n\n"                     # Заключение
+        f"<i>Источники:</i>\n{sources}"
+    )
+
+
 # Хендлер команды /start
 @dp.message(Command(commands=["start"]))
 async def send_welcome(message: Message):
@@ -95,7 +112,8 @@ async def process_url(message: Message):
         return
 
     if summary:
-        await message.reply("Резюме статьи:\n\n" + "\n\n".join(f"- {sent}" for sent in summary))
+        post = format_post(summary, url)
+        await message.reply(post, parse_mode="HTML")
     else:
         await message.reply("Не удалось создать резюме статьи.")
 
